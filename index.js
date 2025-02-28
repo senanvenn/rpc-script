@@ -21,8 +21,6 @@ const config = {
   },
   query: {
     startTimestamp: parseInt(process.env.START_TIMESTAMP, 10),
-    endTimestamp: parseInt(process.env.END_TIMESTAMP, 10),
-    // Use command-line arg if provided, otherwise fall back to .env
     targetChain: cmdTargetChain || process.env.TARGET_CHAIN
   },
   output: process.env.OUTPUT_FILE || 'unique_addresses.csv'
@@ -31,8 +29,7 @@ const config = {
 // Validate configuration
 function validateConfig() {
   const requiredVars = [
-    'MONGODB_URI', 'MONGODB_DB_NAME', 'START_TIMESTAMP', 
-    'END_TIMESTAMP'
+    'MONGODB_URI', 'MONGODB_DB_NAME', 'START_TIMESTAMP'
   ];
 
   const missingVars = requiredVars.filter(varName => !process.env[varName]);
@@ -84,15 +81,15 @@ async function queryTransactions(db) {
   try {
     const collection = db.collection('venn-guard-txs');
     
+    // Simple query with just the lower bound on timestamp
     const query = {
-      timestamp: {
-        $gte: config.query.startTimestamp,
-        $lte: config.query.endTimestamp
-      },
+      timestamp: { $gte: config.query.startTimestamp },
       target: config.query.targetChain
     };
-
+    
+    const humanStartDate = new Date(config.query.startTimestamp * 1000).toLocaleString();
     console.log(`Querying transactions with criteria:`, query);
+    console.log(`Finding all transactions from ${humanStartDate} (${config.query.startTimestamp}) until present`);
     
     const transactions = await collection.find(query).toArray();
     console.log(`Found ${transactions.length} transactions matching criteria`);
