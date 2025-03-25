@@ -2,12 +2,12 @@ require('dotenv').config();
 const { MongoClient } = require('mongodb');
 const { ethers } = require('ethers');
 const createCsvWriter = require('csv-writer').createObjectCsvWriter;
+const fs = require('fs');
 
-// Parse command line arguments
-const args = process.argv.slice(2);
-const cmdTargetChain = args[0]; // First argument will be the target chain
+// List of all chains to process
+const ALL_CHAINS = ['bnb', 'mainnet', 'bnbtestnet', 'holesky'];
 
-// Configuration from environment variables with command line override
+// Configuration from environment variables
 const config = {
   mongodb: {
     uri: process.env.MONGODB_URI,
@@ -20,10 +20,9 @@ const config = {
     mainnet: process.env.MAINNET_RPC_URL
   },
   query: {
-    startTimestamp: parseInt(process.env.START_TIMESTAMP, 10),
-    targetChain: cmdTargetChain || process.env.TARGET_CHAIN
+    startTimestamp: parseInt(process.env.START_TIMESTAMP, 10)
   },
-  output: process.env.OUTPUT_FILE || 'unique_addresses.csv'
+  output: process.env.OUTPUT_FILE || 'all_chains_unique_addresses.csv'
 };
 
 // Validate configuration
@@ -38,18 +37,17 @@ function validateConfig() {
     process.exit(1);
   }
 
-  // Check if target chain is specified
-  if (!config.query.targetChain) {
-    console.error('No target chain specified. Please provide a chain as a command-line argument or set TARGET_CHAIN in .env file.');
-    console.error('Usage: node index.js <chain>');
-    console.error('Example: node index.js holesky');
-    process.exit(1);
+  // Validate RPC URLs for all chains
+  const missingRpcUrls = [];
+  for (const chain of ALL_CHAINS) {
+    const rpcUrlVar = `${chain.toUpperCase()}_RPC_URL`;
+    if (!process.env[rpcUrlVar]) {
+      missingRpcUrls.push(rpcUrlVar);
+    }
   }
-
-  // Validate RPC URL for target chain exists
-  const rpcUrlVar = `${config.query.targetChain.toUpperCase()}_RPC_URL`;
-  if (!process.env[rpcUrlVar]) {
-    console.error(`Missing RPC URL for chain ${config.query.targetChain}. Please set ${rpcUrlVar} in .env file.`);
+  
+  if (missingRpcUrls.length > 0) {
+    console.error(`Missing RPC URLs for chains: ${missingRpcUrls.join(', ')}`);
     process.exit(1);
   }
 }
@@ -67,7 +65,7 @@ async function connectToMongoDB() {
   }
 }
 
-// Get RPC provider for the target chain
+// Get RPC provider for a specific chain
 function getRpcProvider(chain) {
   const rpcUrl = config.rpc[chain.toLowerCase()];
   if (!rpcUrl) {
@@ -76,72 +74,65 @@ function getRpcProvider(chain) {
   return new ethers.JsonRpcProvider(rpcUrl);
 }
 
-// Query transactions from MongoDB
-async function queryTransactions(db) {
+// Query transactions from MongoDB for a specific chain
+async function queryTransactions(db, targetChain) {
   try {
     const collection = db.collection('venn-guard-txs');
     
-    // Simple query with just the lower bound on timestamp
     const query = {
       timestamp: { $gte: config.query.startTimestamp },
-      target: config.query.targetChain
+      target: targetChain
     };
     
     const humanStartDate = new Date(config.query.startTimestamp * 1000).toLocaleString();
-    console.log(`Querying transactions with criteria:`, query);
+    console.log(`\nQuerying transactions for chain ${targetChain}`);
     console.log(`Finding all transactions from ${humanStartDate} (${config.query.startTimestamp}) until present`);
     
     const transactions = await collection.find(query).toArray();
-    console.log(`Found ${transactions.length} transactions matching criteria`);
+    console.log(`Found ${transactions.length} transactions matching criteria for ${targetChain}`);
     return transactions;
   } catch (error) {
-    console.error('Error querying transactions:', error);
+    console.error(`Error querying transactions for ${targetChain}:`, error);
     throw error;
   }
 }
 
-// Combined function to extract all "from" addresses
-async function extractFromAddresses(transactions, provider) {
-  console.log(`Processing ${transactions.length} documents for "from" addresses...`);
+// Extract unique "from" addresses (simplified - no counts)
+async function extractFromAddresses(transactions, provider, targetChain) {
+  console.log(`Processing ${transactions.length} documents for "from" addresses on ${targetChain}...`);
   
-  // Change from Set to Map to track transaction counts
-  const addressTransactionCounts = new Map();
-  const methodCounts = {};
+  // Use a Set for unique addresses
+  const uniqueAddresses = new Set();
   let processedCount = 0;
   
   for (const doc of transactions) {
     try {
       processedCount++;
-      methodCounts[doc.method] = (methodCounts[doc.method] || 0) + 1;
       
       // Extract from standard transaction methods
-      await processDocument(doc, provider, addressTransactionCounts);
+      await processDocument(doc, provider, uniqueAddresses);
       
       // Log progress less frequently
-      if (processedCount % 50 === 0) {
-        console.log(`Processed ${processedCount}/${transactions.length} documents. Found ${addressTransactionCounts.size} unique "from" addresses so far.`);
+      if (processedCount % 100 === 0) {
+        console.log(`Processed ${processedCount}/${transactions.length} documents on ${targetChain}. Found ${uniqueAddresses.size} unique addresses.`);
       }
     } catch (error) {
-      console.error(`Error processing document ${processedCount}:`, error);
+      console.error(`Error processing document ${processedCount} on ${targetChain}:`, error);
     }
   }
   
-  console.log(`\nMethod counts:`, methodCounts);
-  console.log(`Processed ${processedCount} total documents`);
-  console.log(`Extracted ${addressTransactionCounts.size} unique "from" addresses`);
+  console.log(`Processed ${processedCount} total documents on ${targetChain}`);
+  console.log(`Extracted ${uniqueAddresses.size} unique "from" addresses from ${targetChain}`);
   
-  // Convert Map to array of objects with address and count
-  return Array.from(addressTransactionCounts.entries()).map(([address, count]) => {
-    return { address, count };
-  });
+  // Return array of unique addresses
+  return Array.from(uniqueAddresses);
 }
 
-// Process a single document to extract from addresses - updated to increment counts
-async function processDocument(doc, provider, addressCounts) {
-  // Helper function to add address with count
+// Process a single document to extract from addresses (simplified - no counts)
+async function processDocument(doc, provider, uniqueAddresses) {
+  // Helper function to add address
   const addAddress = (address) => {
-    const lowerAddress = address.toLowerCase();
-    addressCounts.set(lowerAddress, (addressCounts.get(lowerAddress) || 0) + 1);
+    if (address) uniqueAddresses.add(address.toLowerCase());
   };
 
   // CASE 1: Block with transactions
@@ -213,29 +204,58 @@ async function processDocument(doc, provider, addressCounts) {
   }
 }
 
-// Write addresses to CSV - updated to include transaction count
-async function writeAddressesToCsv(addressData) {
-  const filename = `${config.query.targetChain}_${config.output}`;
+// Merge address arrays from multiple chains
+function mergeAddresses(allAddressArrays) {
+  // Combine all addresses into one Set to ensure uniqueness
+  const allUniqueAddresses = new Set();
+  
+  for (const addressArray of allAddressArrays) {
+    for (const address of addressArray) {
+      allUniqueAddresses.add(address);
+    }
+  }
+  
+  return Array.from(allUniqueAddresses);
+}
+
+// Write addresses to CSV - simplified to just one column
+async function writeAddressesToCsv(addresses) {
+  const filename = config.output;
   
   const csvWriter = createCsvWriter({
     path: filename,
     header: [
-      { id: 'address', title: 'ADDRESS' },
-      { id: 'count', title: 'TRANSACTION_COUNT' }
+      { id: 'address', title: 'ADDRESS' }
     ]
   });
   
-  // Sort by transaction count (highest first)
-  const sortedAddresses = addressData.sort((a, b) => b.count - a.count);
+  const records = addresses.map(address => ({ address }));
   
-  await csvWriter.writeRecords(sortedAddresses);
-  console.log(`CSV file created successfully at ${filename}`);
+  await csvWriter.writeRecords(records);
+  console.log(`\nCSV file created successfully at ${filename}`);
+  console.log(`Total unique addresses: ${addresses.length}`);
+}
+
+// Process a single chain
+async function processChain(db, chain) {
+  console.log(`\n========== Processing chain: ${chain} ==========`);
   
-  // Print top addresses by transaction count
-  console.log('\nTop 5 addresses by transaction count:');
-  sortedAddresses.slice(0, 5).forEach((item, index) => {
-    console.log(`${index + 1}. ${item.address}: ${item.count} transactions`);
-  });
+  try {
+    const provider = getRpcProvider(chain);
+    const transactions = await queryTransactions(db, chain);
+    
+    if (transactions.length === 0) {
+      console.log(`No transactions found for ${chain}, skipping...`);
+      return [];
+    }
+    
+    const addresses = await extractFromAddresses(transactions, provider, chain);
+    console.log(`Completed processing for ${chain}`);
+    return addresses;
+  } catch (error) {
+    console.error(`Error processing chain ${chain}:`, error);
+    return []; // Return empty array on error to continue with other chains
+  }
 }
 
 // Main function
@@ -244,22 +264,26 @@ async function main() {
     // Step 1: Validate configuration
     validateConfig();
     
-    console.log(`Target chain: ${config.query.targetChain}`);
-    
-    // Step 2: Setup connections
+    // Step 2: Setup MongoDB connection
     const db = await connectToMongoDB();
-    const provider = getRpcProvider(config.query.targetChain);
     
-    // Step 3: Query transactions
-    const transactions = await queryTransactions(db);
+    // Step 3: Process each chain
+    console.log(`Processing ${ALL_CHAINS.length} chains: ${ALL_CHAINS.join(', ')}`);
     
-    // Step 4: Extract addresses
-    const fromAddresses = await extractFromAddresses(transactions, provider);
+    const allAddressArrays = [];
+    for (const chain of ALL_CHAINS) {
+      const addresses = await processChain(db, chain);
+      allAddressArrays.push(addresses);
+    }
     
-    // Step 5: Write output
-    await writeAddressesToCsv(fromAddresses);
+    // Step 4: Merge addresses from all chains
+    const mergedAddresses = mergeAddresses(allAddressArrays);
+    console.log(`\nTotal unique addresses across all chains: ${mergedAddresses.length}`);
     
-    console.log('Process completed successfully!');
+    // Step 5: Write combined output
+    await writeAddressesToCsv(mergedAddresses);
+    
+    console.log('\nProcess completed successfully!');
     process.exit(0);
   } catch (error) {
     console.error('Fatal error:', error);
