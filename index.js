@@ -97,8 +97,8 @@ async function queryTransactions(db, targetChain) {
   }
 }
 
-// Extract unique "from" addresses (simplified - no counts)
-async function extractFromAddresses(transactions, provider, targetChain) {
+// Extract unique "from" addresses (with transaction counts)
+async function extractFromAddresses(transactions, provider, targetChain, addressCounts) {
   console.log(`Processing ${transactions.length} documents for "from" addresses on ${targetChain}...`);
   
   // Use a Set for unique addresses
@@ -110,7 +110,7 @@ async function extractFromAddresses(transactions, provider, targetChain) {
       processedCount++;
       
       // Extract from standard transaction methods
-      await processDocument(doc, provider, uniqueAddresses);
+      await processDocument(doc, provider, uniqueAddresses, addressCounts);
       
       // Log progress less frequently
       if (processedCount % 100 === 0) {
@@ -128,11 +128,20 @@ async function extractFromAddresses(transactions, provider, targetChain) {
   return Array.from(uniqueAddresses);
 }
 
-// Process a single document to extract from addresses (simplified - no counts)
-async function processDocument(doc, provider, uniqueAddresses) {
-  // Helper function to add address
+// Process a single document to extract from addresses (with transaction counts)
+async function processDocument(doc, provider, uniqueAddresses, addressCounts) {
+  // Helper function to add address and update counts
   const addAddress = (address) => {
-    if (address) uniqueAddresses.add(address.toLowerCase());
+    if (address) {
+      const lowerAddress = address.toLowerCase();
+      uniqueAddresses.add(lowerAddress);
+      
+      if (addressCounts[lowerAddress]) {
+        addressCounts[lowerAddress]++;
+      } else {
+        addressCounts[lowerAddress] = 1;
+      }
+    }
   };
 
   // CASE 1: Block with transactions
@@ -237,24 +246,24 @@ async function writeAddressesToCsv(addresses) {
 }
 
 // Process a single chain
-async function processChain(db, chain) {
+async function processChain(db, chain, addressCounts) {
   console.log(`\n========== Processing chain: ${chain} ==========`);
   
   try {
     const provider = getRpcProvider(chain);
     const transactions = await queryTransactions(db, chain);
-    
+
     if (transactions.length === 0) {
       console.log(`No transactions found for ${chain}, skipping...`);
-      return [];
+      return { addresses: [], transactionCount: 0 };
     }
-    
-    const addresses = await extractFromAddresses(transactions, provider, chain);
+
+    const addresses = await extractFromAddresses(transactions, provider, chain, addressCounts);
     console.log(`Completed processing for ${chain}`);
-    return addresses;
+    return { addresses, transactionCount: transactions.length };
   } catch (error) {
     console.error(`Error processing chain ${chain}:`, error);
-    return []; // Return empty array on error to continue with other chains
+    return { addresses: [], transactionCount: 0 }; // Return empty data on error to continue with other chains
   }
 }
 
@@ -271,17 +280,40 @@ async function main() {
     console.log(`Processing ${ALL_CHAINS.length} chains: ${ALL_CHAINS.join(', ')}`);
     
     const allAddressArrays = [];
+    let totalTransactions = 0; // Track total transactions
+    const transactionsByChain = {}; // Track transactions by chain
+    const addressCounts = {}; // Initialize address counts map
+    
     for (const chain of ALL_CHAINS) {
-      const addresses = await processChain(db, chain);
+      const { addresses, transactionCount } = await processChain(db, chain, addressCounts);
       allAddressArrays.push(addresses);
+      transactionsByChain[chain] = transactionCount;
+      totalTransactions += transactionCount;
     }
     
     // Step 4: Merge addresses from all chains
     const mergedAddresses = mergeAddresses(allAddressArrays);
     console.log(`\nTotal unique addresses across all chains: ${mergedAddresses.length}`);
+    console.log(`Total transactions across all chains: ${totalTransactions}`);
     
-    // Step 5: Write combined output
+    // Log breakdown by chain
+    console.log("\nBreakdown by chain:");
+    for (const chain of ALL_CHAINS) {
+      console.log(`${chain}: ${transactionsByChain[chain]} transactions`);
+    }
+    
+    // Convert timestamp to human-readable date
+    const startDate = new Date(config.query.startTimestamp * 1000).toLocaleString();
+    console.log(`\nTime period: From ${startDate} to now`);
+    
+    // Step 5: Write combined address output
     await writeAddressesToCsv(mergedAddresses);
+    
+    // Step 6: Write transaction statistics to a separate file
+    await writeTransactionStatsToCsv(mergedAddresses.length, totalTransactions, transactionsByChain, startDate);
+    
+    // Step 7: Write address transaction counts to a separate CSV
+    await writeAddressTransactionCountsToCsv(addressCounts);
     
     console.log('\nProcess completed successfully!');
     process.exit(0);
@@ -289,6 +321,66 @@ async function main() {
     console.error('Fatal error:', error);
     process.exit(1);
   }
+}
+
+// New function to write transaction statistics to a separate CSV
+async function writeTransactionStatsToCsv(walletCount, totalTransactions, transactionsByChain, startDate) {
+  // Create filename by replacing .csv with _stats.csv
+  const baseFilename = config.output.replace(/\.csv$/, '');
+  const statsFilename = `${baseFilename}_stats.csv`;
+  
+  // Initialize CSV writer for statistics
+  const csvWriter = createCsvWriter({
+    path: statsFilename,
+    header: [
+      { id: 'metric', title: 'METRIC' },
+      { id: 'value', title: 'VALUE' }
+    ]
+  });
+  
+  // Prepare records for the stats CSV
+  const records = [
+    { metric: 'Time Period Start', value: startDate },
+    { metric: 'Time Period End', value: new Date().toLocaleString() },
+    { metric: 'Total Unique Wallets', value: walletCount },
+    { metric: 'Total Transactions', value: totalTransactions },
+  ];
+  
+  // Add per-chain transaction counts
+  for (const chain of ALL_CHAINS) {
+    records.push({
+      metric: `Transactions on ${chain}`,
+      value: transactionsByChain[chain] || 0
+    });
+  }
+  
+  await csvWriter.writeRecords(records);
+  console.log(`\nTransaction statistics CSV created successfully at ${statsFilename}`);
+}
+
+// New function to write address transaction counts to a separate CSV
+async function writeAddressTransactionCountsToCsv(addressCounts) {
+  // Create filename by appending _counts to the original output filename
+  const baseFilename = config.output.replace(/\.csv$/, '');
+  const countsFilename = `${baseFilename}_counts.csv`;
+  
+  // Initialize CSV writer for address transaction counts
+  const csvWriter = createCsvWriter({
+    path: countsFilename,
+    header: [
+      { id: 'address', title: 'ADDRESS' },
+      { id: 'transactionCount', title: 'TRANSACTION_COUNT' }
+    ]
+  });
+  
+  // Prepare records for the counts CSV
+  const records = Object.keys(addressCounts).map(address => ({
+    address,
+    transactionCount: addressCounts[address]
+  }));
+  
+  await csvWriter.writeRecords(records);
+  console.log(`\nAddress transaction counts CSV created successfully at ${countsFilename}`);
 }
 
 // Run the script
