@@ -315,9 +315,6 @@ async function main() {
     // Step 7: Write address transaction counts to a separate CSV
     await writeAddressTransactionCountsToCsv(addressCounts);
     
-    // New function to find intersection between intract.csv and unique addresses
-    await writeIntersectionAddressesToCsv(mergedAddresses);
-    
     console.log('\nProcess completed successfully!');
     process.exit(0);
   } catch (error) {
@@ -384,53 +381,6 @@ async function writeAddressTransactionCountsToCsv(addressCounts) {
   
   await csvWriter.writeRecords(records);
   console.log(`\nAddress transaction counts CSV created successfully at ${countsFilename}`);
-}
-
-// New function to find intersection between intract.csv and unique addresses
-async function writeIntersectionAddressesToCsv(uniqueAddresses) {
-  const intractFilePath = 'intract.csv';
-  const baseFilename = config.output.replace(/\.csv$/, '');
-  const intersectionFilename = `${baseFilename}_intersection.csv`;
-  
-  console.log(`\nFinding intersection with addresses in ${intractFilePath}...`);
-  
-  // Read addresses from intract.csv
-  let intractAddresses = [];
-  try {
-    const fileContent = fs.readFileSync(intractFilePath, 'utf8');
-    intractAddresses = fileContent.split('\n')
-      .map(line => line.trim())
-      .filter(line => line && line.match(/^0x[a-fA-F0-9]{40}$/)); // Filter valid Ethereum addresses
-    
-    console.log(`Read ${intractAddresses.length} addresses from ${intractFilePath}`);
-  } catch (error) {
-    console.error(`Error reading intract.csv file: ${error.message}`);
-    return; // Exit the function if intract.csv cannot be read
-  }
-  
-  // Convert all addresses to lowercase for case-insensitive comparison
-  const normalizedIntractAddresses = new Set(intractAddresses.map(addr => addr.toLowerCase()));
-  const normalizedUniqueAddresses = uniqueAddresses.map(addr => addr.toLowerCase());
-  
-  // Find intersection
-  const intersectionAddresses = normalizedUniqueAddresses.filter(addr => 
-    normalizedIntractAddresses.has(addr)
-  );
-  
-  console.log(`Found ${intersectionAddresses.length} addresses in common between intract.csv and unique addresses`);
-  
-  // Write intersection to CSV
-  const csvWriter = createCsvWriter({
-    path: intersectionFilename,
-    header: [
-      { id: 'address', title: 'ADDRESS' }
-    ]
-  });
-  
-  const records = intersectionAddresses.map(address => ({ address }));
-  
-  await csvWriter.writeRecords(records);
-  console.log(`Intersection addresses CSV created successfully at ${intersectionFilename}`);
 }
 
 // Run the script
